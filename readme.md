@@ -33,7 +33,7 @@ The following types of objects can use the knight-bus:
    
    key = b"-----BEGIN RSA PRIVATE KEY-----\n ......"
 
-   receiver = Receiver(key)
+   receiver = Receiver(key=key)
    obj = receiver.recv()    # This step blocks until an object is received.
     ```
 4. Use Sender to send object
@@ -43,7 +43,7 @@ The following types of objects can use the knight-bus:
    
    key = b"-----BEGIN PUBLIC KEY-----\n ......"
      
-   sender = Sender(key, ip="....", port=...)
+   sender = Sender(key=key, ip="....", port=...)
    sender.send([1,2,"3",{"4":"four"}])
     ```
 5. The object has been transported to `obj` by knight-bus!!!
