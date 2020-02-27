@@ -1,5 +1,6 @@
 import multiprocessing
 import string
+import time
 import unittest
 from random import choice, randint
 
@@ -52,9 +53,10 @@ get_obj_list = [random_byte, random_obj, random_str, random_list, ret_cls, ret_f
 class MyTestCase(unittest.TestCase):
 
     @staticmethod
-    def run_send(key, q):
+    def run_send(key, method, q):
         from knight_bus.Sender import Sender
-        sender = Sender(key)
+        time.sleep(0.2)  # make sure receiver is open first
+        sender = Sender(key=key, encrypt_method=method)
         test_obj = []
         for random_obj in get_obj_list:
             test_obj.append(random_obj())
@@ -63,21 +65,34 @@ class MyTestCase(unittest.TestCase):
         sender.disconnect()
 
     @staticmethod
-    def run_recv(key, q):
+    def run_recv(key, method, q):
         from knight_bus.Receiver import Receiver
-        receiver = Receiver(key)
+        receiver = Receiver(key=key, encrypt_method=method)
         test_obj = []
         for i in range(6):
             test_obj.append(receiver.recv())
         q.put(test_obj)
         receiver.disconnect()
 
-    def test_transport(self):
+    def test_rsa_transport(self):
         from loopyCryptor import generate_RSA_key
         pub_key, pri_key = generate_RSA_key()
         q = multiprocessing.Queue()
-        jobs = [multiprocessing.Process(target=MyTestCase.run_recv, args=(pri_key, q)),
-                multiprocessing.Process(target=MyTestCase.run_send, args=(pub_key, q))]
+        jobs = [multiprocessing.Process(target=MyTestCase.run_recv, args=(pri_key, 'rsa', q)),
+                multiprocessing.Process(target=MyTestCase.run_send, args=(pub_key, 'rsa', q))]
+        for p in jobs:
+            p.start()
+        for p in jobs:
+            p.join()
+
+        results = [q.get() for p in jobs]
+        self.assertEqual(results[0], results[1])
+
+    def test_none_transport(self):
+
+        q = multiprocessing.Queue()
+        jobs = [multiprocessing.Process(target=MyTestCase.run_recv, args=(None, 'none', q)),
+                multiprocessing.Process(target=MyTestCase.run_send, args=(None, 'none', q))]
         for p in jobs:
             p.start()
         for p in jobs:

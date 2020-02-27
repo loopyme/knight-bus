@@ -1,22 +1,24 @@
 import socket
 from abc import abstractmethod
 
-from loopyCryptor import Cryptor
+from loopyCryptor import Cryptor, Serializer
 
 
 class Base:
-    _buffer_size = 2048
-
     def __init__(
             self,
-            key: str or bytes,
+            encrypt_method: str = "rsa",
+            key: str or bytes = None,
             ip: str = "127.0.0.1",
             port: int = 8900,
             auto_connect: bool = True,
+            buffer_size: int = 2048,
     ):
         """
         init
-
+        
+        :param encrypt_method: the method of encryption
+                                currently support: rsa, none
         :param key: the key of sender/receiver
                     Sender holds the public key (use to encrypt & verify),
                     Receiver holds the private key (use to decrypt & sign).
@@ -26,16 +28,73 @@ class Base:
         :param port: port of Receiver
                     Default value set to 8900
         :param auto_connect: whether to connect automatically when init
+        :param buffer_size: size of receiving buffer.
+                            Default value set to 2048 (2k)
         """
+        self._salt = None
+        self._is_connected = None
+
+        self.key = key
+        self.buffer_size = int(buffer_size)
         self.server_address = (str(ip), int(port))
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        Cryptor.set_default_RSA_key(public_key=key, private_key=key)
-        self._is_connected = None
-        self._salt = Cryptor.generate_AES_key()
+        self.encrypt_method = str(encrypt_method)
 
         if auto_connect:
             self.connect()
+
+    def salt(self, verify=False):
+        """
+        use a 16-bytes long AES key as salt
+
+        :param verify: whether the salt value is used for verify
+        :return: bytes
+        """
+        if not verify:
+            self._salt = Cryptor.generate_AES_key()
+        return self._salt
+
+    @property
+    def encrypt_method(self):
+        return
+
+    @encrypt_method.setter
+    def encrypt_method(self, method: str):
+        """
+        set protocol for transport
+
+        :param method: same as encrypt_method in __init__()
+        :return: none
+        """
+        method = method.lower()
+        if method == "none":
+            if self.key is not None:
+                raise UserWarning("When not using encryption method, you don't need to pass in a key")
+
+            self._serialize = lambda obj: Serializer.to_byte(obj)
+            self._deserialize = lambda bytes_: Serializer.to_obj(bytes_)
+
+            self._build_header = lambda size, md5: self._serialize((size, md5, self.salt()))
+            self._read_header = lambda header: self._deserialize(header)
+            self._build_ack = lambda size, md5, salt: Cryptor.md5((size, md5, salt)).encode()
+            self._verify_ack = lambda ack, size, md5: Cryptor.md5((size, md5, self.salt(verify=True))).encode() == ack
+
+        elif method == "rsa":
+            if self.key is None:
+                raise ValueError("When using encryption method, you need to pass in a key")
+
+            self._serialize = lambda obj: Cryptor.RSA_encrypt(obj, key=self.key)
+            self._deserialize = lambda bytes_: Cryptor.RSA_decrypt(bytes_, key=self.key)
+
+            self._build_header = lambda size, md5: self._serialize(("knight-bus", size, md5, self.salt()))
+            self._read_header = lambda header: self._deserialize(header)[1:4]
+            self._build_ack = lambda size, md5, salt: Cryptor.RSA_sign(("bus-knight", size, md5, salt), key=self.key)
+            self._verify_ack = lambda ack, size, md5: Cryptor.RSA_verify(
+                ("bus-knight", size, md5, self.salt(verify=True)), ack, key=self.key)
+        else:
+            raise NotImplementedError(
+                "Method \"{}\" is not currently supported.Try rsa or none.".format(method))
 
     @abstractmethod
     def connect(self):
@@ -60,7 +119,7 @@ class Base:
         except Exception as e:
             raise ConnectionError("Send bytes failed:{}".format(e))
 
-    def _recv_bytes(self, size=2048):
+    def _recv_bytes(self, size: int = None):
         """
         receive bytes
 
@@ -70,7 +129,7 @@ class Base:
         """
         self.connect()
         try:
-            bytes_ = self.socket.recv(size)
+            bytes_ = self.socket.recv(size if size is not None else self.buffer_size)
         except Exception as e:
             raise ConnectionError("Recv bytes failed:{}".format(e))
         return bytes_
@@ -85,14 +144,11 @@ class Base:
         :return: None
         :raise: ConnectionAbortedError: something wrong with server's signature
         """
+
         try:
-            self._send_bytes(
-                Cryptor.RSA_encrypt(["LOOPY 1029384756", self._salt, size, md5])
-            )
-            if not Cryptor.RSA_verify(
-                    ["LOOPY 1029384756", Cryptor.md5(self._salt), size, md5],
-                    self._recv_bytes(),
-            ):
+            self._send_bytes(self._build_header(size, md5))
+            ack = self._recv_bytes()
+            if not self._verify_ack(ack, size, md5):
                 raise ConnectionError("ACK not matched")
         except Exception as e:
             self.disconnect()
@@ -107,11 +163,12 @@ class Base:
         :return: size & md5 of incoming object
         :raise: ConnectionAbortedError: header is damaged or something wrong with signature
         """
+
         try:
-            code, salt, size, md5 = Cryptor.RSA_decrypt(self._recv_bytes())
-            if code != "LOOPY 1029384756":
-                raise ConnectionError("Code not matched")
-            self._send_bytes(Cryptor.RSA_sign([code, Cryptor.md5(salt), size, md5]))
+            header = self._recv_bytes()
+            size, md5, salt = self._read_header(header)
+            ack = self._build_ack(size, md5, salt)
+            self._send_bytes(ack)
         except Exception as e:
             self.disconnect()
             raise ConnectionAbortedError(
@@ -130,12 +187,13 @@ class Base:
         :return: received object
         :raise: ConnectionAbortedError: receive failed or object is damaged
         """
+
         size, md5 = self._recv_object_header()
         try:
             bytes_ = b""
             while size > 0:
                 buffer = self._recv_bytes(
-                    self._buffer_size if size > self._buffer_size else size
+                    self.buffer_size if size > self.buffer_size else size
                 )
                 size -= len(buffer)
                 bytes_ += buffer
@@ -143,7 +201,8 @@ class Base:
                     break
             if md5 != Cryptor.md5(bytes_):
                 raise ConnectionError("Object md5 unmatched")
-            obj = Cryptor.RSA_decrypt(bytes_)
+            else:
+                obj = self._deserialize(bytes_)
         except Exception as e:
             self.disconnect()
             raise ConnectionAbortedError(
@@ -159,7 +218,8 @@ class Base:
         :param obj: object to be sent
         :return: None
         """
-        data = Cryptor.RSA_encrypt(obj)
+
+        data = self._serialize(obj)
         self._send_object_header(size=len(data), md5=Cryptor.md5(data))
         self._send_bytes(data)
 
